@@ -17,7 +17,7 @@ except:
     pprint = print
 from dataset import DataLoader, SongData, random_split
 
-debug = True
+debug = False
 
 
 def accuracy(out: torch.Tensor, target: torch.Tensor, raw_size: int):
@@ -31,10 +31,10 @@ def accuracy(out: torch.Tensor, target: torch.Tensor, raw_size: int):
 class SongGen:
     def __init__(self) -> None:
         self.seq_len = 48
-        self.batch_size = 12
+        self.batch_size = 64
         self.embedding_size = 128
         self.lstm_hidden_size = 512
-        self.lr = 0.001
+        self.lr = 0.01
 
         self.device = torch.device("cuda:0")
         self.dataset = SongData(
@@ -81,6 +81,7 @@ class SongGen:
         self.process: Progress = Progress()
 
     def generate(self, start_phrases: str):
+        self.model.eval()
         words = start_phrases.split("/")
 
         hidden = None
@@ -116,6 +117,7 @@ class SongGen:
         return "".join(res)
 
     def generate_all(self):
+        self.model.eval()
         hidden = None
         last_word = "<SOS>"
         res = []
@@ -146,11 +148,12 @@ class SongGen:
     def train_step(self):
         self.model.train()
         task = self.process.add_task("Training...", total=len(self.train_loader))
+        loss_total = 0
         for i, (input_, target_) in enumerate(self.train_loader):
             input_, target_ = input_.to(self.device), target_.to(self.device)
             out: torch.Tensor = self.model(input_)[0]
             loss = fc.cross_entropy(out.reshape(-1, self.raw_size), target_.flatten())
-
+            loss_total += loss.item()
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
@@ -164,8 +167,21 @@ class SongGen:
                 description=f"Training: Epoch={self.epoch} Batch={i}/{len(self.train_loader)} Loss={loss.item():.4f}",
             )
         self.optimizer_scheduler.step()
-
         self.process.stop_task(task)
+        self.process.remove_task(task)
+        self.process.print(
+            f"LR={self.optimizer_scheduler.get_last_lr()}  Train AvgLoss={loss_total/len(self.train_loader):.4f}"
+        )
+
+    def set_lr(self, new_lr: float):
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = new_lr
+
+    def get_lr(self):
+        res = []
+        for param_group in self.optimizer.param_groups:
+            res.append(str(param_group["lr"]))
+        return ",".join(res)
 
     def evaluation_step(self):
         self.model.eval()
@@ -194,6 +210,9 @@ class SongGen:
         self.process.start()
         tran_task = self.process.add_task("Training...", total=epochs)
 
+        # adjust lr manual
+        # self.set_lr(0.005)
+
         epochs += self.epoch
         if check_file is None:
             import time
@@ -201,11 +220,12 @@ class SongGen:
             check_file = f'checkpoint-{time.strftime("%y%m%d-%H%M%S")}.pth'
 
         while self.epoch < epochs:
+            self.process.update(tran_task, description=f"LR={self.get_lr()}")
             self.train_step()
             self.evaluation_step()
             self.epoch += 1
             self.save_checkpoint(check_file)
-            self.process.print(self.generate("你/好/我/谁"))
+            self.process.print(self.generate("你/我/你/我"))
             self.process.update(tran_task, advance=1)
 
         self.process.stop()
